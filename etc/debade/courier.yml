@@ -1,0 +1,15 @@
+servers:
+  my_server1:
+    host: <host>
+    port: <port>
+    username: <username>
+    password: <password>
+    exchange: <exchange>
+    type: fanout
+  my_server2:
+    host: <host>
+    port: <port>
+    username: <username>
+    password: <password>
+    exchange: <exchange>
+    type: topic
