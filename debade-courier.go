@@ -13,17 +13,37 @@ import (
 	YAML "menteslibres.net/gosexy/yaml"
 )
 
+//构造 Debade 结构
+type Debade struct {
+	c *AMQP.Channel //channel对象
+
+	e string //exchange
+	t string //type
+}
+
+//消息发送
+func (this *Debade) send(d []byte) {
+
+	msg := AMQP.Publishing{
+		DeliveryMode: AMQP.Persistent,
+		Timestamp:    time.Now(),
+		ContentType:  "application/json",
+		Body:         []byte(d),
+	}
+
+	err := this.c.Publish(this.e, this.t, false, false, msg)
+
+	if err != nil {
+		log.Fatalf("publish: %v", err)
+	}
+}
+
 func main() {
 
+	//flag 变量定义
 	var (
 		conf_file string
 		verbose   bool
-		chs       map[string](*AMQP.Channel) //key 为 queue 名称, value 为 channel
-		exs       map[string]string          //key 为 queue 名称, value 为 exchange
-		types     map[string]string          //key为 queue 名称, value 为 type
-		_type     string                     //queue 类型
-		exchange  string                     //exchange名称
-		channel   *AMQP.Channel              //channel对象
 	)
 
 	// flag 配置设定
@@ -43,10 +63,76 @@ func main() {
 		log.Fatalf("Cannot Open %s: %v", conf_file, err)
 	}
 
-	context, _ := ZMQ.NewContext()
+	//定义 Debade 合计
+	Ds := make(map[interface{}]*Debade)
 
-	socket, _ := context.NewSocket(ZMQ.PULL)
+	//对 Yaml 中的 Servers 尝试进行 Connect
+	for name, _ := range yaml.Get("servers").(map[interface{}]interface{}) {
+
+		host := yaml.Get("servers", name, "host").(string)
+		port := yaml.Get("servers", name, "port").(int)
+		username := yaml.Get("servers", name, "username").(string)
+		password := yaml.Get("servers", name, "password").(string)
+
+		exchange := yaml.Get("servers", name, "exchange").(string)
+
+		if len(exchange) == 0 {
+			exchange = "default"
+		}
+
+		_type := yaml.Get("servers", name, "type").(string)
+
+		if len(_type) == 0 {
+			_type = "fanout"
+		}
+
+		amqp_url := fmt.Sprintf("amqp://%s:%s@%s:%d/", username, password, host, port)
+
+		if verbose {
+			log.Printf("AMQP: %s\n", amqp_url)
+			log.Printf("exchange: %s\n", exchange)
+		}
+
+		connection, err := AMQP.Dial(amqp_url)
+		defer connection.Close()
+
+		if err != nil {
+			log.Fatalf("RabbitMQ Connection Error %v", err)
+		}
+
+		channel, err := connection.Channel()
+		defer channel.Close()
+
+		if err != nil {
+			log.Fatalf("RabbitMQ Connection Cannot Get Channel %v", err)
+		}
+
+		err = channel.ExchangeDeclare(exchange, _type, true, false, false, false, nil)
+
+		if err != nil {
+			log.Fatalf("exchange.declare: %v", err)
+		}
+
+		Ds[name] = &Debade{
+			c: channel,
+			e: exchange,
+			t: _type,
+		}
+	}
+
+	//进行启动 ZMQ 进行 ZMQ 处理
+	context, err := ZMQ.NewContext()
+
+	if err != nil {
+		log.Fatalf("Cannot Create ZMQ Context: %v", err)
+	}
+
+	socket, err := context.NewSocket(ZMQ.PULL)
 	defer socket.Close()
+
+	if err != nil {
+		log.Fatalf("Cannot Create ZMQ Socket: %v", err)
+	}
 
 	socket.Bind("tcp://0.0.0.0:3333")
 
@@ -59,100 +145,24 @@ func main() {
 
 		if len(str) > 0 {
 
-			j, err := JSON.LoadString(str)
+			j, _ := JSON.LoadString(str)
 
 			if verbose {
 				log.Println(str)
 			}
 
-			//可正常解析
-			if err == nil {
+			//判断是否包含 queue
+			if queue, ok := j.CheckGet("queue"); ok {
 
-				//判断是否包含 queue
-				if queue, ok := j.CheckGet("queue"); ok {
+				d, _ := j.Get("data").MarshalJSON()
 
-					q, _ := queue.String()
-
-					c := yaml.Get("servers", q)
-
-					//初始化内存
-					chs = make(map[string](*AMQP.Channel))
-					exs = make(map[string]string)
-					types = make(map[string]string)
-
-					if c != nil {
-
-						channel, ok = chs[q]
-						exchange, _ = exs[q]
-						_type, _ = types[q]
-
-						if !ok {
-							host := yaml.Get("servers", q, "host").(string)
-							port := yaml.Get("servers", q, "port").(int)
-							username := yaml.Get("servers", q, "username").(string)
-							password := yaml.Get("servers", q, "password").(string)
-
-							exchange = yaml.Get("servers", q, "exchange").(string)
-
-							if len(exchange) == 0 {
-								exchange = "default"
-							}
-
-							_type := yaml.Get("servers", q, "type").(string)
-
-							if len(_type) == 0 {
-								_type = "fanout"
-							}
-
-							amqp_url := fmt.Sprintf("amqp://%s:%s@%s:%d/", username, password, host, port)
-
-							if verbose {
-								log.Printf("AMQP: %s\n", amqp_url)
-								log.Printf("exchange: %s\n", exchange)
-							}
-
-							connection, err := AMQP.Dial(amqp_url)
-							defer connection.Close()
-
-							if err != nil {
-								log.Fatal("RabbitMQ Connection Error %v", err)
-							}
-
-							channel, _ = connection.Channel()
-							defer channel.Close()
-
-							err = channel.ExchangeDeclarePassive(exchange, _type, true, false, false, false, nil)
-
-							if err != nil {
-								log.Fatalf("exchange.declare: %v", err)
-							}
-
-							chs[q] = channel
-							exs[q] = exchange
-							types[q] = _type
-
-						}
-
-						data := j.Get("data")
-						d, _ := data.MarshalJSON()
-
-						msg := AMQP.Publishing{
-							DeliveryMode: AMQP.Persistent,
-							Timestamp:    time.Now(),
-							ContentType:  "application/json",
-							Body:         []byte(d),
-						}
-
-						if verbose {
-							log.Printf("data: %s\n", d)
-						}
-
-						err = channel.Publish(exchange, _type, false, false, msg)
-						if err != nil {
-							log.Fatalf("publish: %v", err)
-						}
-					}
+				if verbose {
+					log.Printf("data: %s\n", d)
 				}
+
+				//fork
+				go Ds[queue].send(d)
+
 			}
 		}
 	}
