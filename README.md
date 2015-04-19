@@ -2,15 +2,12 @@
 
 ## 简介
 
-用 **GO** 重写了 [debade-courier](https://github.com/iamfat/debade-courier)
+用 **[golang](http://golang.org)** 重写了的 [debade-courier](https://github.com/iamfat/debade-courier)
 
-效率杠杠的!
+## Todo List
 
-@iamfat 要不我们把线上都替换了吧
-
-## Todo List:
-
-* 增加 Dockerfile
+* 性能比对
+* chan 总数限定
 
 ## License
 

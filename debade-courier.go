@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"time"
 
 	JSON "github.com/gobs/simplejson"
@@ -22,7 +23,7 @@ type Debade struct {
 }
 
 //消息发送
-func (this *Debade) send(d []byte) {
+func (this *Debade) send(d []byte, rk string) {
 
 	msg := AMQP.Publishing{
 		DeliveryMode: AMQP.Persistent,
@@ -31,7 +32,11 @@ func (this *Debade) send(d []byte) {
 		Body:         []byte(d),
 	}
 
-	err := this.c.Publish(this.e, this.t, false, false, msg)
+	if len(rk) == 0 {
+		rk = this.t
+	}
+
+	err := this.c.Publish(this.e, rk, false, false, msg)
 
 	if err != nil {
 		log.Fatalf("publish: %v", err)
@@ -40,15 +45,20 @@ func (this *Debade) send(d []byte) {
 
 func main() {
 
-	//flag 变量定义
 	var (
-		conf_file string
-		verbose   bool
+		// flag
+		conf_file  string
+		verbose    bool
+		concurrent int
+
+		// debade
+		rk string
 	)
 
 	// flag 配置设定
-	flag.StringVar(&conf_file, "c", "/etc/debade/courier.yml", "debade config file")
+	flag.StringVar(&conf_file, "f", "/etc/debade/courier.yml", "Debade config file")
 	flag.BoolVar(&verbose, "v", true, "Verbose mode")
+	flag.IntVar(&concurrent, "n", 10, "Number of multiple requests to make at a time")
 
 	flag.Parse()
 
@@ -63,8 +73,11 @@ func main() {
 		log.Fatalf("Cannot Open %s: %v", conf_file, err)
 	}
 
-	//定义 Debade 合计
-	Ds := make(map[interface{}]*Debade)
+	// 设置并发数
+	runtime.GOMAXPROCS(concurrent)
+
+	//定义 Debade 合集
+	Ds := make(map[string]*Debade)
 
 	//对 Yaml 中的 Servers 尝试进行 Connect
 	for name, _ := range yaml.Get("servers").(map[interface{}]interface{}) {
@@ -107,20 +120,26 @@ func main() {
 			log.Fatalf("RabbitMQ Connection Cannot Get Channel %v", err)
 		}
 
-		err = channel.ExchangeDeclare(exchange, _type, true, false, false, false, nil)
+		// durable false
+		// autoDelete true
+		// internal false
+		// 与 debade-trigger 符合
+		err = channel.ExchangeDeclare(exchange, _type, false, true, false, false, nil)
 
 		if err != nil {
 			log.Fatalf("exchange.declare: %v", err)
 		}
 
-		Ds[name] = &Debade{
+		n := name.(string)
+
+		Ds[n] = &Debade{
 			c: channel,
 			e: exchange,
 			t: _type,
 		}
 	}
 
-	//进行启动 ZMQ 进行 ZMQ 处理
+	// 进行启动 ZMQ 进行 ZMQ 处理
 	context, err := ZMQ.NewContext()
 
 	if err != nil {
@@ -138,12 +157,10 @@ func main() {
 
 	log.Println("Listend tcp://0.0.0.0:3333")
 
-	//死循环遍历
+	// 死循环遍历
 	for {
-		//等待接受数据
-		str, _ := socket.Recv(ZMQ.DONTWAIT)
-
-		if len(str) > 0 {
+		// 等待接受数据
+		if str, _ := socket.Recv(ZMQ.DONTWAIT); len(str) > 0 {
 
 			j, _ := JSON.LoadString(str)
 
@@ -151,18 +168,24 @@ func main() {
 				log.Println(str)
 			}
 
-			//判断是否包含 queue
+			// 判断是否包含 queue
 			if queue, ok := j.CheckGet("queue"); ok {
-
 				d, _ := j.Get("data").MarshalJSON()
 
 				if verbose {
 					log.Printf("data: %s\n", d)
 				}
 
-				//fork
-				go Ds[queue].send(d)
+				q, _ := queue.String()
 
+				// 包含 routing
+				if jrk, ok := j.CheckGet("routing"); ok {
+					rk, _ = jrk.String()
+				} else {
+					rk = ""
+				}
+
+				go Ds[q].send(d, rk)
 			}
 		}
 	}
