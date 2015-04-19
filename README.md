@@ -7,7 +7,6 @@
 ## Todo List
 
 * 性能比对
-* chan 总数限定
 
 ## License
 
